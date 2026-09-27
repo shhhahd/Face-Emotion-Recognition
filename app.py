@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 from facenet_pytorch import InceptionResnetV1
+from huggingface_hub import hf_hub_download
 
 # 1. إعدادات الصفحة
 st.set_page_config(
@@ -43,7 +44,7 @@ def load_emotion_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model()
     
-    model_path = "emotion_model_facenet_final.pth"
+    model_path = hf_hub_download(repo_id="shhhahd/emotion-facenet", filename="emotion_model_facenet_final.pth")
     if os.path.exists(model_path):
         state_dict = torch.load(model_path, map_location=device)
         model.load_state_dict(state_dict)
