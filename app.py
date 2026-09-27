@@ -43,7 +43,7 @@ def load_emotion_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model()
     
-    model_path = "../models/emotion_model_facenet_final.pth"
+    model_path = "emotion_model_facenet_final.pth"
     if os.path.exists(model_path):
         state_dict = torch.load(model_path, map_location=device)
         model.load_state_dict(state_dict)
