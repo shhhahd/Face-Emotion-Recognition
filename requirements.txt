@@ -5,3 +5,4 @@ facenet-pytorch
 numpy
 pillow
 opencv-python-headless
+huggingface_hub
