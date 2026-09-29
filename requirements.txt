@@ -4,5 +4,6 @@ torchvision
 facenet-pytorch
 numpy
 pillow
-opencv-python-headless
+opencv-python-headless==4.9.0.80
 huggingface_hub
+
