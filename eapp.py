@@ -8,12 +8,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from facenet_pytorch import InceptionResnetV1
+from huggingface_hub import hf_hub_download
 
-# ============ الإعدادات ============
+# ============ Settings ============
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
 NUM_CLASSES = len(EMOTIONS)
-IMG_SIZE = 160          # مقاس InceptionResnetV1
-BASE_SIZE = 48          # المقاس الأصلي اللي الداتا اتحضرت بيه (FER2013)
+IMG_SIZE = 160          # InceptionResnetV1 input size
+BASE_SIZE = 48          # Original size the data was prepared with (FER2013)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 COLORS = {  # BGR
@@ -22,14 +23,23 @@ COLORS = {  # BGR
     "surprise": (0, 165, 255),
 }
 
+HF_REPO_ID = "ShahdAmr2004/emotion-facenet"
+HF_FILENAME = "emotion_model_facenet_final.pth"
+
 st.set_page_config(page_title="Emotion Recognition", layout="centered")
-st.title("😀 كشف تعابير الوجه")
+st.title("😀 Facial Emotion Recognition")
 
 
-# ============ تحميل الموديل (مرة واحدة) ============
+# ============ Model loading (once) ============
+@st.cache_resource
+def get_weights_path():
+    # Downloads the file once and caches it; later calls return the local path immediately
+    return hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME)
+
+
 @st.cache_resource
 def load_model(weights_path):
-    # pretrained=None عشان مانحملش أوزان VGGFace2 تاني، هنحمّل أوزانك إنت
+    # pretrained=None so we don't download the VGGFace2 weights again; we load our own weights
     model = InceptionResnetV1(pretrained=None, classify=False)
     model.logits = nn.Sequential(nn.Dropout(0.5), nn.Linear(512, NUM_CLASSES))
     model.classify = True
@@ -45,7 +55,7 @@ def load_face_detector():
     return cv2.CascadeClassifier(path)
 
 
-# ============ نفس الـ preprocessing بتاع التدريب ============
+# ============ Same preprocessing as training ============
 def preprocess_face(gray_face):
     face = cv2.resize(gray_face, (BASE_SIZE, BASE_SIZE))          # 48x48
     face = face.astype(np.float32) / 255.0                         # 0-1
@@ -64,14 +74,14 @@ def predict_probs(model, gray_face):
 
 
 def process_frame(frame_bgr, model, detector, prev_probs, smooth):
-    """يكتشف الوجوه، يصنف التعبير، يرسم النتيجة. يرجع (الفريم، آخر probs)."""
+    """Detects faces, classifies the emotion, draws the result. Returns (frame, last probs)."""
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     faces = detector.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(60, 60))
 
     probs = None
     for (x, y, w, h) in faces:
         probs = predict_probs(model, gray[y:y + h, x:x + w])
-        # تنعيم بسيط عشان اللابل ما يفضلش يتنطط بين فريم والتاني
+        # Simple smoothing so the label doesn't jump between frames
         if prev_probs is not None:
             probs = smooth * prev_probs + (1 - smooth) * probs
 
@@ -87,20 +97,22 @@ def process_frame(frame_bgr, model, detector, prev_probs, smooth):
 
 def show_probs(placeholder, probs):
     if probs is None:
-        placeholder.info("مفيش وجه ظاهر في الفريم.")
+        placeholder.info("No face detected in the frame.")
         return
     placeholder.bar_chart({e: float(p) for e, p in zip(EMOTIONS, probs)})
 
 
-# ============ الواجهة ============
-st.sidebar.header("الإعدادات")
-weights_path = st.sidebar.text_input("مسار ملف الموديل", "emotion_model_facenet_final.pth")
-mode = st.sidebar.radio("المصدر", ["الكاميرا (لايف)", "رفع فيديو"])
-smooth = st.sidebar.slider("تنعيم النتيجة", 0.0, 0.9, 0.5, 0.1)
+# ============ UI ============
+st.sidebar.header("Settings")
+mode = st.sidebar.radio("Source", ["Camera (live)", "Upload video"])
+smooth = st.sidebar.slider("Result smoothing", 0.0, 0.9, 0.5, 0.1)
 
-if not os.path.exists(weights_path):
-    st.error(f"ملف الموديل مش موجود: {weights_path}")
-    st.stop()
+with st.spinner("Downloading the model from Hugging Face..."):
+    try:
+        weights_path = get_weights_path()
+    except Exception as e:
+        st.error(f"Failed to download the model: {e}")
+        st.stop()
 
 model = load_model(weights_path)
 detector = load_face_detector()
@@ -108,29 +120,29 @@ detector = load_face_detector()
 frame_box = st.empty()
 probs_box = st.empty()
 
-if mode == "الكاميرا (لايف)":
-    run = st.sidebar.checkbox("تشغيل الكاميرا")
+if mode == "Camera (live)":
+    run = st.sidebar.checkbox("Start camera")
     if run:
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            st.error("مش قادر أفتح الكاميرا. تأكد إنها متوصلة ومش مستخدمة في برنامج تاني.")
+            st.error("Unable to open the camera. Make sure it's connected and not in use by another program.")
         else:
             prev = None
             while run:
                 ok, frame = cap.read()
                 if not ok:
-                    st.error("مشكلة في قراءة الفريم من الكاميرا.")
+                    st.error("Problem reading a frame from the camera.")
                     break
                 frame, prev = process_frame(frame, model, detector, prev, smooth)
                 frame_box.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 show_probs(probs_box, prev)
             cap.release()
     else:
-        st.info("فعّل 'تشغيل الكاميرا' من القائمة الجانبية.")
+        st.info("Enable 'Start camera' from the sidebar.")
 
 else:
-    skip = st.sidebar.slider("عالج فريم كل كام فريم", 1, 10, 2)
-    video_file = st.file_uploader("ارفع فيديو", type=["mp4", "mov", "avi", "mkv"])
+    skip = st.sidebar.slider("Process every N-th frame", 1, 10, 2)
+    video_file = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "mkv"])
     if video_file is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tfile.write(video_file.read())
@@ -150,6 +162,6 @@ else:
             show_probs(probs_box, prev)
         cap.release()
         os.unlink(tfile.name)
-        st.success("خلص الفيديو.")
+        st.success("Video finished.")
     else:
-        st.info("ارفع فيديو عشان يبدأ التحليل.")
+        st.info("Upload a video to start the analysis.")
