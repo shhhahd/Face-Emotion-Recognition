@@ -1,6 +1,4 @@
-import os
-import tempfile
-
+import av
 import cv2
 import numpy as np
 import streamlit as st
@@ -9,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from facenet_pytorch import InceptionResnetV1
 from huggingface_hub import hf_hub_download
+from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
 
 # ============ Settings ============
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
@@ -33,13 +32,11 @@ st.title("😀 Facial Emotion Recognition")
 # ============ Model loading (once) ============
 @st.cache_resource
 def get_weights_path():
-    # Downloads the file once and caches it; later calls return the local path immediately
     return hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME)
 
 
 @st.cache_resource
 def load_model(weights_path):
-    # pretrained=None so we don't download the VGGFace2 weights again; we load our own weights
     model = InceptionResnetV1(pretrained=None, classify=False)
     model.logits = nn.Sequential(nn.Dropout(0.5), nn.Linear(512, NUM_CLASSES))
     model.classify = True
@@ -57,12 +54,12 @@ def load_face_detector():
 
 # ============ Same preprocessing as training ============
 def preprocess_face(gray_face):
-    face = cv2.resize(gray_face, (BASE_SIZE, BASE_SIZE))          # 48x48
-    face = face.astype(np.float32) / 255.0                         # 0-1
-    img = np.stack([face, face, face], axis=0)                     # (3,48,48)
+    face = cv2.resize(gray_face, (BASE_SIZE, BASE_SIZE))
+    face = face.astype(np.float32) / 255.0
+    img = np.stack([face, face, face], axis=0)
     tensor = torch.from_numpy(img).float().unsqueeze(0)
     tensor = F.interpolate(tensor, size=(IMG_SIZE, IMG_SIZE),
-                           mode="bilinear", align_corners=False)   # 160x160
+                           mode="bilinear", align_corners=False)
     tensor = (tensor - 0.5) / 0.5
     return tensor.to(DEVICE)
 
@@ -81,7 +78,6 @@ def process_frame(frame_bgr, model, detector, prev_probs, smooth):
     probs = None
     for (x, y, w, h) in faces:
         probs = predict_probs(model, gray[y:y + h, x:x + w])
-        # Simple smoothing so the label doesn't jump between frames
         if prev_probs is not None:
             probs = smooth * prev_probs + (1 - smooth) * probs
 
@@ -95,73 +91,44 @@ def process_frame(frame_bgr, model, detector, prev_probs, smooth):
     return frame_bgr, (probs if probs is not None else prev_probs)
 
 
-def show_probs(placeholder, probs):
-    if probs is None:
-        placeholder.info("No face detected in the frame.")
-        return
-    placeholder.bar_chart({e: float(p) for e, p in zip(EMOTIONS, probs)})
+# ============ Live camera processor ============
+class EmotionProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.model = load_model(get_weights_path())
+        self.detector = load_face_detector()
+        self.prev = None
+        self.smooth = 0.5
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        img, self.prev = process_frame(img, self.model, self.detector, self.prev, self.smooth)
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
 # ============ UI ============
 st.sidebar.header("Settings")
-mode = st.sidebar.radio("Source", ["Camera (live)", "Upload video"])
 smooth = st.sidebar.slider("Result smoothing", 0.0, 0.9, 0.5, 0.1)
 
+# Download the model once up front so the camera starts without delay
 with st.spinner("Downloading the model from Hugging Face..."):
     try:
-        weights_path = get_weights_path()
+        get_weights_path()
     except Exception as e:
         st.error(f"Failed to download the model: {e}")
         st.stop()
 
-model = load_model(weights_path)
-detector = load_face_detector()
+ctx = webrtc_streamer(
+    key="emotion",
+    mode=WebRtcMode.SENDRECV,
+    video_processor_factory=EmotionProcessor,
+    rtc_configuration={
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    },
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+)
 
-frame_box = st.empty()
-probs_box = st.empty()
+if ctx.video_processor:
+    ctx.video_processor.smooth = smooth
 
-if mode == "Camera (live)":
-    run = st.sidebar.checkbox("Start camera")
-    if run:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            st.error("Unable to open the camera. Make sure it's connected and not in use by another program.")
-        else:
-            prev = None
-            while run:
-                ok, frame = cap.read()
-                if not ok:
-                    st.error("Problem reading a frame from the camera.")
-                    break
-                frame, prev = process_frame(frame, model, detector, prev, smooth)
-                frame_box.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                show_probs(probs_box, prev)
-            cap.release()
-    else:
-        st.info("Enable 'Start camera' from the sidebar.")
-
-else:
-    skip = st.sidebar.slider("Process every N-th frame", 1, 10, 2)
-    video_file = st.file_uploader("Upload a video", type=["mp4", "mov", "avi", "mkv"])
-    if video_file is not None:
-        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-        tfile.write(video_file.read())
-        tfile.close()
-
-        cap = cv2.VideoCapture(tfile.name)
-        prev, i = None, 0
-        while cap.isOpened():
-            ok, frame = cap.read()
-            if not ok:
-                break
-            i += 1
-            if i % skip:
-                continue
-            frame, prev = process_frame(frame, model, detector, prev, smooth)
-            frame_box.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            show_probs(probs_box, prev)
-        cap.release()
-        os.unlink(tfile.name)
-        st.success("Video finished.")
-    else:
-        st.info("Upload a video to start the analysis.")
+st.caption("Click START, then allow camera access in your browser.")
