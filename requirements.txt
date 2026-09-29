@@ -1,4 +1,6 @@
 streamlit
+streamlit-webrtc
+av
 torch==2.2.2
 torchvision==0.17.2
 facenet-pytorch==2.6.0
